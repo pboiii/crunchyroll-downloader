@@ -165,11 +165,25 @@ type segmentJob struct {
 	url   string
 }
 
-func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (string, error) {
+func downloadTrackBytes(baseUrl, representationId *string, set *mpd.AdaptationSet) ([]byte, error) {
+	if set == nil || baseUrl == nil || representationId == nil {
+		return nil, errors.New("missing track representation")
+	}
+	if set.SegmentTemplate == nil {
+		source, err := url.Parse(*baseUrl)
+		if err != nil || !strings.EqualFold(filepath.Ext(source.Path), ".mp4") {
+			return nil, errors.New("track has neither a segment template nor a complete MP4 source")
+		}
+		return downloadPart(*baseUrl)
+	}
+	template := set.SegmentTemplate
+	if template.Initialization == nil || template.Media == nil || template.SegmentTimeline == nil || len(template.SegmentTimeline.S) == 0 {
+		return nil, errors.New("incomplete track segment template")
+	}
 	initUrl := buildUrl(*baseUrl, *representationId, *set.SegmentTemplate.Initialization, nil)
 	initData, err := downloadPart(initUrl)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	timeline := expandTimeline(set.SegmentTemplate.SegmentTimeline.S, 1)
@@ -207,7 +221,7 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 	wg.Wait()
 
 	if downloadErr != nil {
-		return "", downloadErr
+		return nil, downloadErr
 	}
 
 	fmt.Println("\nFinished downloading!")
@@ -216,6 +230,15 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 	parts = append(parts, initData...)
 	for _, data := range results {
 		parts = append(parts, data...)
+	}
+
+	return parts, nil
+}
+
+func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (string, error) {
+	parts, err := downloadTrackBytes(baseUrl, representationId, set)
+	if err != nil {
+		return "", err
 	}
 
 	filename := getFilename(set)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,60 @@ import (
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+func TestDownloadTrackBytesSupportsFullMP4AndSegmentedManifests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := map[string]string{
+			"/audio.mp4?signature=fixture": "complete encrypted MP4",
+			"/init.mp4":                    "init",
+			"/segment-00001.m4s":           "first",
+			"/segment-00002.m4s":           "second",
+		}
+		body, ok := parts[r.URL.RequestURI()]
+		if !ok {
+			t.Errorf("unexpected track request %q", r.URL.RequestURI())
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name string
+		xml  string
+		want string
+	}{
+		{"SegmentBase MP4", `<MPD><Period><AdaptationSet mimeType="audio/mp4"><Representation id="audio" bandwidth="192000"><BaseURL>%s/audio.mp4?signature=fixture</BaseURL><SegmentBase indexRange="800-900"><Initialization range="0-799"/></SegmentBase></Representation></AdaptationSet></Period></MPD>`, "complete encrypted MP4"},
+		{"SegmentTemplate", `<MPD><Period><AdaptationSet mimeType="audio/mp4"><SegmentTemplate initialization="init.mp4" media="segment-$Number$.m4s"><SegmentTimeline><S d="1000" r="1"/></SegmentTimeline></SegmentTemplate><Representation id="audio" bandwidth="192000"><BaseURL>%s/</BaseURL></Representation></AdaptationSet></Period></MPD>`, "initfirstsecond"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := new(mpd.MPD)
+			if err := manifest.Decode([]byte(fmt.Sprintf(tc.xml, server.URL))); err != nil {
+				t.Fatal(err)
+			}
+			set := manifest.Period[0].AdaptationSets[0]
+			base, id := getBaseUrl(set, false, "192k")
+			got, err := downloadTrackBytes(base, id, set)
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("track bytes = %q, error = %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDownloadTrackBytesRejectsMissingTrackMetadata(t *testing.T) {
+	for name, set := range map[string]*mpd.AdaptationSet{
+		"missing set":         nil,
+		"missing template":    {},
+		"incomplete template": {SegmentTemplate: &mpd.SegmentTemplate{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := downloadTrackBytes(strPtr("https://example.invalid/unknown"), strPtr("audio"), set); err == nil {
+				t.Fatal("missing track metadata was accepted")
+			}
+		})
+	}
+}
 
 func TestFetchSubtitleASSRetainsRawBytesAndRejectsBadStatus(t *testing.T) {
 	raw := []byte("\xEF\xBB\xBF[Script Info]\r\nTitle: raw\r\n[Events]\r\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,A, B\r\n")
