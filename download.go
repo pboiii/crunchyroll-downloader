@@ -242,6 +242,10 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 	if err != nil {
 		return "", err
 	}
+	key, err := contentKeyForTrack(parts, keys)
+	if err != nil {
+		return "", err
+	}
 
 	filename := getFilename(set)
 	file, err := os.Create(filename)
@@ -249,8 +253,8 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 		return "", err
 	}
 	defer file.Close()
-	if err = widevine.DecryptMP4Auto(io.NopCloser(bytes.NewReader(parts)), keys, file); err != nil {
-		return "", fmt.Errorf("widevine.DecryptMP4Auto: %w", err)
+	if err = widevine.DecryptMP4(bytes.NewReader(parts), key, file); err != nil {
+		return "", fmt.Errorf("widevine.DecryptMP4: %w", err)
 	}
 
 	return filename, nil

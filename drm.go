@@ -11,12 +11,44 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Eyevinn/mp4ff/mp4"
 	"github.com/iyear/gowidevine"
 	"github.com/iyear/gowidevine/widevinepb"
 	"github.com/unki2aut/go-mpd"
 )
 
 var keys []*widevine.Key
+
+func contentKeyForTrack(data []byte, licenseKeys []*widevine.Key) ([]byte, error) {
+	reader := bytes.NewReader(data)
+	var moov *mp4.MoovBox
+	for reader.Len() > 0 {
+		box, err := mp4.DecodeBox(uint64(len(data)-reader.Len()), reader)
+		if err != nil {
+			return nil, fmt.Errorf("read track initialization: %w", err)
+		}
+		moov, _ = box.(*mp4.MoovBox)
+		if moov != nil {
+			break
+		}
+	}
+	if moov == nil {
+		return nil, errors.New("track initialization not found")
+	}
+	if len(moov.Traks) != 1 {
+		return nil, errors.New("expected one media track per provider representation")
+	}
+	protection := moov.GetSinf(moov.Traks[0].Tkhd.TrackID)
+	if protection == nil || protection.Schi == nil || protection.Schi.Tenc == nil {
+		return nil, errors.New("track has no encryption key identifier")
+	}
+	for _, key := range licenseKeys {
+		if key != nil && key.Type == widevinepb.License_KeyContainer_CONTENT && bytes.Equal(key.ID, protection.Schi.Tenc.DefaultKID) {
+			return key.Key, nil
+		}
+	}
+	return nil, errors.New("license has no content key matching this media track")
+}
 
 func getPssh(mpd *mpd.MPD) *string {
 	if mpd == nil || len(mpd.Period) == 0 || mpd.Period[0] == nil || len(mpd.Period[0].AdaptationSets) == 0 {
