@@ -7,7 +7,54 @@ import (
 	"testing"
 
 	"github.com/iyear/gowidevine"
+	"github.com/unki2aut/go-mpd"
 )
+
+func TestGetPsshSelectsWidevineRegardlessOfProtectionOrder(t *testing.T) {
+	playReady := mpd.Descriptor{SchemeIDURI: strPtr("urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95"), CencPSSH: strPtr("playready")}
+	widevine := mpd.Descriptor{SchemeIDURI: strPtr("urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"), CencPSSH: strPtr("widevine")}
+	for _, protections := range [][]mpd.Descriptor{{playReady, widevine}, {widevine, playReady}} {
+		manifest := &mpd.MPD{Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{{ContentProtections: protections}}}}}
+		if got := getPssh(manifest); got == nil || *got != "widevine" {
+			t.Fatalf("expected Widevine PSSH, got %v", got)
+		}
+	}
+}
+
+func TestGetPsshRejectsMissingWidevine(t *testing.T) {
+	for name, protection := range map[string]mpd.Descriptor{
+		"PlayReady only": {SchemeIDURI: strPtr("urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95"), CencPSSH: strPtr("playready")},
+		"missing scheme": {CencPSSH: strPtr("unidentified")},
+		"missing PSSH":   {SchemeIDURI: strPtr("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")},
+		"empty PSSH":     {SchemeIDURI: strPtr("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"), CencPSSH: strPtr("")},
+		"blank PSSH":     {SchemeIDURI: strPtr("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"), CencPSSH: strPtr(" \n\t")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set := &mpd.AdaptationSet{ContentProtections: []mpd.Descriptor{protection}}
+			manifest := &mpd.MPD{Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{set}}}}
+			if got := getPssh(manifest); got != nil {
+				t.Fatalf("expected no Widevine PSSH, got %q", *got)
+			}
+		})
+	}
+}
+
+func TestGetPsshHandlesEmptyManifest(t *testing.T) {
+	for name, manifest := range map[string]*mpd.MPD{
+		"nil manifest":       nil,
+		"no periods":         {},
+		"nil period":         {Period: []*mpd.Period{nil}},
+		"no adaptation sets": {Period: []*mpd.Period{{}}},
+		"nil adaptation set": {Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{nil}}}},
+		"no protections":     {Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{{}}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := getPssh(manifest); got != nil {
+				t.Fatalf("expected no PSSH, got %q", *got)
+			}
+		})
+	}
+}
 
 func TestOpenPrivateRegularFileRejectsBroadModeAndSymlink(t *testing.T) {
 	dir := t.TempDir()

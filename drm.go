@@ -18,17 +18,23 @@ import (
 
 var keys []*widevine.Key
 
-// getPssh finds the PSSH in the MPD manifest
 func getPssh(mpd *mpd.MPD) *string {
+	if mpd == nil || len(mpd.Period) == 0 || mpd.Period[0] == nil || len(mpd.Period[0].AdaptationSets) == 0 {
+		return nil
+	}
 	set := mpd.Period[0].AdaptationSets[0]
 	if set == nil {
 		return nil
 	}
 
 	for _, contentProtection := range set.ContentProtections {
-		if contentProtection.CencPSSH != nil {
-			return contentProtection.CencPSSH
+		if contentProtection.SchemeIDURI == nil || !strings.EqualFold(*contentProtection.SchemeIDURI, "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed") {
+			continue
 		}
+		if contentProtection.CencPSSH == nil || strings.TrimSpace(*contentProtection.CencPSSH) == "" {
+			continue
+		}
+		return contentProtection.CencPSSH
 	}
 
 	return nil

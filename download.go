@@ -527,7 +527,7 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		manifest := parseDownloadManifest(episode.ManifestURL)
 		pssh := getPssh(manifest)
 		if pssh == nil {
-			return errors.New("PSSH not found")
+			return errors.New("Widevine PSSH not found")
 		}
 		// getLicense stores the keys in the global "keys" used by downloadParts,
 		// so audio for this version must be downloaded before the next license.
