@@ -25,11 +25,13 @@ const maxWorkers = 10
 const maxSubtitleBytes int64 = 16 << 20
 
 const providerHTTPTimeout = 30 * time.Second
+const fullMediaHTTPTimeout = 5 * time.Minute
 
 // These variables are test-overridable; production provider requests remain
 // bounded even when a provider stalls without returning an HTTP error.
 var subtitleHTTPClient = &http.Client{Timeout: providerHTTPTimeout}
 var segmentHTTPClient = &http.Client{Timeout: providerHTTPTimeout}
+var fullMediaHTTPClient = &http.Client{Timeout: fullMediaHTTPTimeout}
 
 // These seams keep the error boundary testable without opening a live playback
 // stream. Production always uses the concrete provider functions.
@@ -101,7 +103,7 @@ func buildUrl(base, representationId, file string, partNum *int64) string {
 	return base + strings.ReplaceAll(file, "$RepresentationID$", representationId)
 }
 
-func downloadPart(url string) ([]byte, error) {
+func downloadPart(url string, client *http.Client) ([]byte, error) {
 	maxRetries := 5
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
@@ -115,7 +117,7 @@ func downloadPart(url string) ([]byte, error) {
 		req.Header.Set("Origin", "https://static.crunchyroll.com")
 		req.Header.Set("Referer", "https://static.crunchyroll.com/")
 		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-		resp, err := segmentHTTPClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			if attempt < maxRetries-1 {
 				continue
@@ -174,14 +176,14 @@ func downloadTrackBytes(baseUrl, representationId *string, set *mpd.AdaptationSe
 		if err != nil || !strings.EqualFold(filepath.Ext(source.Path), ".mp4") {
 			return nil, errors.New("track has neither a segment template nor a complete MP4 source")
 		}
-		return downloadPart(*baseUrl)
+		return downloadPart(*baseUrl, fullMediaHTTPClient)
 	}
 	template := set.SegmentTemplate
 	if template.Initialization == nil || template.Media == nil || template.SegmentTimeline == nil || len(template.SegmentTimeline.S) == 0 {
 		return nil, errors.New("incomplete track segment template")
 	}
 	initUrl := buildUrl(*baseUrl, *representationId, *set.SegmentTemplate.Initialization, nil)
-	initData, err := downloadPart(initUrl)
+	initData, err := downloadPart(initUrl, segmentHTTPClient)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +203,7 @@ func downloadTrackBytes(baseUrl, representationId *string, set *mpd.AdaptationSe
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				data, err := downloadPart(job.url)
+				data, err := downloadPart(job.url, segmentHTTPClient)
 				if err != nil {
 					errOnce.Do(func() { downloadErr = err })
 					return

@@ -19,6 +19,24 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
 
+func TestFullMP4DownloadUsesLongerBoundedBodyDeadline(t *testing.T) {
+	client := *fullMediaHTTPClient
+	client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok || time.Until(deadline) <= providerHTTPTimeout || time.Until(deadline) > fullMediaHTTPTimeout {
+			t.Errorf("full MP4 request did not receive its longer bounded deadline")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("complete MP4")), Header: make(http.Header)}, nil
+	})
+	original := fullMediaHTTPClient
+	fullMediaHTTPClient = &client
+	t.Cleanup(func() { fullMediaHTTPClient = original })
+	got, err := downloadTrackBytes(strPtr("https://example.invalid/video.mp4"), strPtr("video"), &mpd.AdaptationSet{})
+	if err != nil || string(got) != "complete MP4" {
+		t.Fatalf("full MP4 download = %q, %v", got, err)
+	}
+}
+
 func TestDownloadTrackBytesSupportsFullMP4AndSegmentedManifests(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := map[string]string{

@@ -58,6 +58,7 @@ func TestProviderHTTPClientsHaveBoundedTimeouts(t *testing.T) {
 	for name, client := range map[string]*http.Client{
 		"subtitle":      subtitleHTTPClient,
 		"segment":       segmentHTTPClient,
+		"full media":    fullMediaHTTPClient,
 		"manifest":      manifestHTTPClient,
 		"token":         tokenHTTPClient,
 		"authenticated": authenticatedHTTPClient,
