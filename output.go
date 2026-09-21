@@ -27,6 +27,9 @@ func trackTitle(locale string) string {
 func mergeEverything(videoFile string, audioTracks, subTracks []mediaTrack, outputFile string, info EpisodeInfo) {
 	args := []string{"-i", videoFile}
 	for _, audio := range audioTracks {
+		if err := normalizeAudioTiming(audio.file); err != nil {
+			panic(fmt.Sprintf("normalize audio timing: %s", err))
+		}
 		args = append(args, "-i", audio.file)
 	}
 	for _, sub := range subTracks {
