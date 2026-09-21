@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Eyevinn/mp4ff/mp4"
 	"github.com/iyear/gowidevine"
 	"github.com/iyear/gowidevine/widevinepb"
 	"github.com/unki2aut/go-mpd"
@@ -18,17 +19,54 @@ import (
 
 var keys []*widevine.Key
 
-// getPssh finds the PSSH in the MPD manifest
+func contentKeyForTrack(data []byte, licenseKeys []*widevine.Key) ([]byte, error) {
+	reader := bytes.NewReader(data)
+	var moov *mp4.MoovBox
+	for reader.Len() > 0 {
+		box, err := mp4.DecodeBox(uint64(len(data)-reader.Len()), reader)
+		if err != nil {
+			return nil, fmt.Errorf("read track initialization: %w", err)
+		}
+		moov, _ = box.(*mp4.MoovBox)
+		if moov != nil {
+			break
+		}
+	}
+	if moov == nil {
+		return nil, errors.New("track initialization not found")
+	}
+	if len(moov.Traks) != 1 {
+		return nil, errors.New("expected one media track per provider representation")
+	}
+	protection := moov.GetSinf(moov.Traks[0].Tkhd.TrackID)
+	if protection == nil || protection.Schi == nil || protection.Schi.Tenc == nil {
+		return nil, errors.New("track has no encryption key identifier")
+	}
+	for _, key := range licenseKeys {
+		if key != nil && key.Type == widevinepb.License_KeyContainer_CONTENT && bytes.Equal(key.ID, protection.Schi.Tenc.DefaultKID) {
+			return key.Key, nil
+		}
+	}
+	return nil, errors.New("license has no content key matching this media track")
+}
+
 func getPssh(mpd *mpd.MPD) *string {
+	if mpd == nil || len(mpd.Period) == 0 || mpd.Period[0] == nil || len(mpd.Period[0].AdaptationSets) == 0 {
+		return nil
+	}
 	set := mpd.Period[0].AdaptationSets[0]
 	if set == nil {
 		return nil
 	}
 
 	for _, contentProtection := range set.ContentProtections {
-		if contentProtection.CencPSSH != nil {
-			return contentProtection.CencPSSH
+		if contentProtection.SchemeIDURI == nil || !strings.EqualFold(*contentProtection.SchemeIDURI, "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed") {
+			continue
 		}
+		if contentProtection.CencPSSH == nil || strings.TrimSpace(*contentProtection.CencPSSH) == "" {
+			continue
+		}
+		return contentProtection.CencPSSH
 	}
 
 	return nil

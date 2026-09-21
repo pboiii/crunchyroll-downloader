@@ -25,11 +25,13 @@ const maxWorkers = 10
 const maxSubtitleBytes int64 = 16 << 20
 
 const providerHTTPTimeout = 30 * time.Second
+const fullMediaHTTPTimeout = 5 * time.Minute
 
 // These variables are test-overridable; production provider requests remain
 // bounded even when a provider stalls without returning an HTTP error.
 var subtitleHTTPClient = &http.Client{Timeout: providerHTTPTimeout}
 var segmentHTTPClient = &http.Client{Timeout: providerHTTPTimeout}
+var fullMediaHTTPClient = &http.Client{Timeout: fullMediaHTTPTimeout}
 
 // These seams keep the error boundary testable without opening a live playback
 // stream. Production always uses the concrete provider functions.
@@ -101,7 +103,7 @@ func buildUrl(base, representationId, file string, partNum *int64) string {
 	return base + strings.ReplaceAll(file, "$RepresentationID$", representationId)
 }
 
-func downloadPart(url string) ([]byte, error) {
+func downloadPart(url string, client *http.Client) ([]byte, error) {
 	maxRetries := 5
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
@@ -115,7 +117,7 @@ func downloadPart(url string) ([]byte, error) {
 		req.Header.Set("Origin", "https://static.crunchyroll.com")
 		req.Header.Set("Referer", "https://static.crunchyroll.com/")
 		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-		resp, err := segmentHTTPClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			if attempt < maxRetries-1 {
 				continue
@@ -165,11 +167,25 @@ type segmentJob struct {
 	url   string
 }
 
-func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (string, error) {
+func downloadTrackBytes(baseUrl, representationId *string, set *mpd.AdaptationSet) ([]byte, error) {
+	if set == nil || baseUrl == nil || representationId == nil {
+		return nil, errors.New("missing track representation")
+	}
+	if set.SegmentTemplate == nil {
+		source, err := url.Parse(*baseUrl)
+		if err != nil || !strings.EqualFold(filepath.Ext(source.Path), ".mp4") {
+			return nil, errors.New("track has neither a segment template nor a complete MP4 source")
+		}
+		return downloadPart(*baseUrl, fullMediaHTTPClient)
+	}
+	template := set.SegmentTemplate
+	if template.Initialization == nil || template.Media == nil || template.SegmentTimeline == nil || len(template.SegmentTimeline.S) == 0 {
+		return nil, errors.New("incomplete track segment template")
+	}
 	initUrl := buildUrl(*baseUrl, *representationId, *set.SegmentTemplate.Initialization, nil)
-	initData, err := downloadPart(initUrl)
+	initData, err := downloadPart(initUrl, segmentHTTPClient)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	timeline := expandTimeline(set.SegmentTemplate.SegmentTimeline.S, 1)
@@ -187,7 +203,7 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				data, err := downloadPart(job.url)
+				data, err := downloadPart(job.url, segmentHTTPClient)
 				if err != nil {
 					errOnce.Do(func() { downloadErr = err })
 					return
@@ -207,7 +223,7 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 	wg.Wait()
 
 	if downloadErr != nil {
-		return "", downloadErr
+		return nil, downloadErr
 	}
 
 	fmt.Println("\nFinished downloading!")
@@ -218,14 +234,27 @@ func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (s
 		parts = append(parts, data...)
 	}
 
+	return parts, nil
+}
+
+func downloadParts(baseUrl, representationId *string, set *mpd.AdaptationSet) (string, error) {
+	parts, err := downloadTrackBytes(baseUrl, representationId, set)
+	if err != nil {
+		return "", err
+	}
+	key, err := contentKeyForTrack(parts, keys)
+	if err != nil {
+		return "", err
+	}
+
 	filename := getFilename(set)
 	file, err := os.Create(filename)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	if err = widevine.DecryptMP4Auto(io.NopCloser(bytes.NewReader(parts)), keys, file); err != nil {
-		return "", fmt.Errorf("widevine.DecryptMP4Auto: %w", err)
+	if err = widevine.DecryptMP4(bytes.NewReader(parts), key, file); err != nil {
+		return "", fmt.Errorf("widevine.DecryptMP4: %w", err)
 	}
 
 	return filename, nil
@@ -527,7 +556,7 @@ func downloadEpisode(baseContentId string, info EpisodeInfo, audioLangs, subsLan
 		manifest := parseDownloadManifest(episode.ManifestURL)
 		pssh := getPssh(manifest)
 		if pssh == nil {
-			return errors.New("PSSH not found")
+			return errors.New("Widevine PSSH not found")
 		}
 		// getLicense stores the keys in the global "keys" used by downloadParts,
 		// so audio for this version must be downloaded before the next license.

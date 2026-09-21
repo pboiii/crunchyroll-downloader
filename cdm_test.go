@@ -1,13 +1,95 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/Eyevinn/mp4ff/mp4"
 	"github.com/iyear/gowidevine"
+	"github.com/iyear/gowidevine/widevinepb"
+	"github.com/unki2aut/go-mpd"
 )
+
+func TestContentKeyForTrackMatchesEncryptedTrackInsteadOfLicenseOrder(t *testing.T) {
+	kid := bytes.Repeat([]byte{1}, 16)
+	want := bytes.Repeat([]byte{2}, 16)
+	init := mp4.CreateEmptyInit()
+	init.AddEmptyTrack(48000, "audio", "eng")
+	if err := init.Moov.Trak.SetAACDescriptor(2, 48000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mp4.InitProtect(init, want, bytes.Repeat([]byte{3}, 16), "cenc", mp4.UUID(kid), nil); err != nil {
+		t.Fatal(err)
+	}
+	var input bytes.Buffer
+	if err := init.Encode(&input); err != nil {
+		t.Fatal(err)
+	}
+	wrong := &widevine.Key{Type: widevinepb.License_KeyContainer_CONTENT, ID: bytes.Repeat([]byte{4}, 16), Key: bytes.Repeat([]byte{5}, 16)}
+	matching := &widevine.Key{Type: widevinepb.License_KeyContainer_CONTENT, ID: kid, Key: want}
+	for _, keys := range [][]*widevine.Key{{wrong, matching}, {matching, wrong}} {
+		got, err := contentKeyForTrack(input.Bytes(), keys)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("matching key selection failed: %v", err)
+		}
+	}
+	if _, err := contentKeyForTrack(input.Bytes(), []*widevine.Key{wrong}); err == nil {
+		t.Fatal("unrelated content key was accepted")
+	}
+	matching.Type = widevinepb.License_KeyContainer_SIGNING
+	if _, err := contentKeyForTrack(input.Bytes(), []*widevine.Key{matching}); err == nil {
+		t.Fatal("non-content key was accepted")
+	}
+}
+
+func TestGetPsshSelectsWidevineRegardlessOfProtectionOrder(t *testing.T) {
+	playReady := mpd.Descriptor{SchemeIDURI: strPtr("urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95"), CencPSSH: strPtr("playready")}
+	widevine := mpd.Descriptor{SchemeIDURI: strPtr("urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"), CencPSSH: strPtr("widevine")}
+	for _, protections := range [][]mpd.Descriptor{{playReady, widevine}, {widevine, playReady}} {
+		manifest := &mpd.MPD{Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{{ContentProtections: protections}}}}}
+		if got := getPssh(manifest); got == nil || *got != "widevine" {
+			t.Fatalf("expected Widevine PSSH, got %v", got)
+		}
+	}
+}
+
+func TestGetPsshRejectsMissingWidevine(t *testing.T) {
+	for name, protection := range map[string]mpd.Descriptor{
+		"PlayReady only": {SchemeIDURI: strPtr("urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95"), CencPSSH: strPtr("playready")},
+		"missing scheme": {CencPSSH: strPtr("unidentified")},
+		"missing PSSH":   {SchemeIDURI: strPtr("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")},
+		"empty PSSH":     {SchemeIDURI: strPtr("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"), CencPSSH: strPtr("")},
+		"blank PSSH":     {SchemeIDURI: strPtr("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"), CencPSSH: strPtr(" \n\t")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set := &mpd.AdaptationSet{ContentProtections: []mpd.Descriptor{protection}}
+			manifest := &mpd.MPD{Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{set}}}}
+			if got := getPssh(manifest); got != nil {
+				t.Fatalf("expected no Widevine PSSH, got %q", *got)
+			}
+		})
+	}
+}
+
+func TestGetPsshHandlesEmptyManifest(t *testing.T) {
+	for name, manifest := range map[string]*mpd.MPD{
+		"nil manifest":       nil,
+		"no periods":         {},
+		"nil period":         {Period: []*mpd.Period{nil}},
+		"no adaptation sets": {Period: []*mpd.Period{{}}},
+		"nil adaptation set": {Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{nil}}}},
+		"no protections":     {Period: []*mpd.Period{{AdaptationSets: []*mpd.AdaptationSet{{}}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := getPssh(manifest); got != nil {
+				t.Fatalf("expected no PSSH, got %q", *got)
+			}
+		})
+	}
+}
 
 func TestOpenPrivateRegularFileRejectsBroadModeAndSymlink(t *testing.T) {
 	dir := t.TempDir()
